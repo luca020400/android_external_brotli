@@ -4,7 +4,7 @@
 # support 2.8.7.
 cmake_minimum_required(VERSION 2.8.6)
 
-project(brotli)
+project(brotli C)
 
 # If Brotli is being bundled in another project, we don't want to
 # install anything.  However, we want to let people override this, so
@@ -22,23 +22,7 @@ if(BROTLI_BUNDLED_MODE STREQUAL "")
 endif()
 mark_as_advanced(BROTLI_BUNDLED_MODE)
 
-include(CMakeDependentOption)
-CMAKE_DEPENDENT_OPTION(BUILD_SHARED_LIBS "Build shared libraries" ON "NOT BROTLI_BUNDLED_MODE" OFF)
-
 include(GNUInstallDirs)
-
-# When building shared libraries it is important to set the correct rpath.
-# See https://cmake.org/Wiki/CMake_RPATH_handling#Always_full_RPATH
-if (BUILD_SHARED_LIBS)
-  add_definitions(-DBROTLI_SHARED_COMPILATION)
-  set(CMAKE_SKIP_BUILD_RPATH FALSE)
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
-  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-  list(FIND CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES "${CMAKE_INSTALL_LIBDIR}" isSystemDir)
-  if ("${isSystemDir}" STREQUAL "-1")
-    set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_LIBDIR}")
-  endif()
-endif()
 
 # Parse version information from common/version.h. Normally we would
 # define these values here and write them out to configuration file(s)
@@ -73,13 +57,24 @@ function(hex_to_dec HEXADECIMAL DECIMAL)
 endfunction(hex_to_dec)
 
 # Version information
-file(STRINGS "common/version.h" _brotli_version_line REGEX "^#define BROTLI_VERSION (0x[0-9a-fA-F]+)$")
+file(STRINGS "c/common/version.h" _brotli_version_line REGEX "^#define BROTLI_VERSION (0x[0-9a-fA-F]+)$")
 string(REGEX REPLACE "^#define BROTLI_VERSION 0x([0-9a-fA-F]+)$" "\\1" _brotli_version_hex "${_brotli_version_line}")
 hex_to_dec("${_brotli_version_hex}" _brotli_version)
 math(EXPR BROTLI_VERSION_MAJOR "${_brotli_version} >> 24")
 math(EXPR BROTLI_VERSION_MINOR "(${_brotli_version} >> 12) & 4095")
-math(EXPR BROTLI_VERSION_REVISION "${_brotli_version} & 4095")
-mark_as_advanced(BROTLI_VERSION_MAJOR BROTLI_VERSION_MINOR BROTLI_VERSION_REVISION)
+math(EXPR BROTLI_VERSION_PATCH "${_brotli_version} & 4095")
+set(BROTLI_VERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_PATCH}")
+mark_as_advanced(BROTLI_VERSION BROTLI_VERSION_MAJOR BROTLI_VERSION_MINOR BROTLI_VERSION_PATCH)
+
+# ABI Version information
+file(STRINGS "c/common/version.h" _brotli_abi_info_line REGEX "^#define BROTLI_ABI_VERSION (0x[0-9a-fA-F]+)$")
+string(REGEX REPLACE "^#define BROTLI_ABI_VERSION 0x([0-9a-fA-F]+)$" "\\1" _brotli_abi_info_hex "${_brotli_abi_info_line}")
+hex_to_dec("${_brotli_abi_info_hex}" _brotli_abi_info)
+math(EXPR BROTLI_ABI_CURRENT "${_brotli_abi_info} >> 24")
+math(EXPR BROTLI_ABI_REVISION "(${_brotli_abi_info} >> 12) & 4095")
+math(EXPR BROTLI_ABI_AGE "${_brotli_abi_info} & 4095")
+math(EXPR BROTLI_ABI_COMPATIBILITY "${BROTLI_ABI_CURRENT} - ${BROTLI_ABI_AGE}")
+mark_as_advanced(BROTLI_ABI_CURRENT BROTLI_ABI_REVISION BROTLI_ABI_AGE BROTLI_ABI_COMPATIBILITY)
 
 if (ENABLE_SANITIZER)
   set(CMAKE_C_FLAGS " ${CMAKE_C_FLAGS} -fsanitize=${ENABLE_SANITIZER}")
@@ -112,10 +107,16 @@ if(NOT LOG2_RES)
 endif()
 unset(LOG2_RES)
 
-set(BROTLI_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(BROTLI_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/c/include")
+mark_as_advanced(BROTLI_INCLUDE_DIRS)
+
 set(BROTLI_LIBRARIES_CORE brotlienc brotlidec brotlicommon)
 set(BROTLI_LIBRARIES ${BROTLI_LIBRARIES_CORE} ${LIBM_LIBRARY})
-mark_as_advanced(BROTLI_INCLUDE_DIRS BROTLI_LIBRARIES)
+mark_as_advanced(BROTLI_LIBRARIES)
+
+set(BROTLI_LIBRARIES_CORE_STATIC brotlienc-static brotlidec-static brotlicommon-static)
+set(BROTLI_LIBRARIES_STATIC ${BROTLI_LIBRARIES_CORE_STATIC} ${LIBM_LIBRARY})
+mark_as_advanced(BROTLI_LIBRARIES_STATIC)
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
   add_definitions(-DOS_LINUX)
@@ -125,50 +126,49 @@ elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   add_definitions(-DOS_MACOSX)
 endif()
 
-add_library(brotlicommon
-  common/dictionary.c)
-add_library(brotlidec
-  dec/bit_reader.c
-  dec/decode.c
-  dec/huffman.c
-  dec/state.c)
-add_library(brotlienc
-  enc/backward_references.c
-  enc/backward_references_hq.c
-  enc/bit_cost.c
-  enc/block_splitter.c
-  enc/brotli_bit_stream.c
-  enc/cluster.c
-  enc/compress_fragment.c
-  enc/compress_fragment_two_pass.c
-  enc/dictionary_hash.c
-  enc/encode.c
-  enc/entropy_encode.c
-  enc/histogram.c
-  enc/literal_cost.c
-  enc/memory.c
-  enc/metablock.c
-  enc/static_dict.c
-  enc/utf8_util.c)
+function(transform_sources_list INPUT_FILE OUTPUT_FILE)
+  file(READ ${INPUT_FILE} TEXT)
+  string(REGEX REPLACE "\\\\\n" "~continuation~" TEXT ${TEXT})
+  string(REGEX REPLACE "([a-zA-Z_][a-zA-Z0-9_]*)[\t ]*=[\t ]*([^\n]*)" "SET(\\1 \\2)" TEXT ${TEXT})
+  string(REPLACE "~continuation~" "\n" TEXT ${TEXT})
+  file(WRITE ${OUTPUT_FILE} ${TEXT})
+endfunction()
+
+transform_sources_list("scripts/sources.lst" "${CMAKE_CURRENT_BINARY_DIR}/sources.lst.cmake")
+include("${CMAKE_CURRENT_BINARY_DIR}/sources.lst.cmake")
+
+add_library(brotlicommon SHARED ${BROTLI_COMMON_C})
+add_library(brotlidec SHARED ${BROTLI_DEC_C})
+add_library(brotlienc SHARED ${BROTLI_ENC_C})
+
+add_library(brotlicommon-static STATIC ${BROTLI_COMMON_C})
+add_library(brotlidec-static STATIC ${BROTLI_DEC_C})
+add_library(brotlienc-static STATIC ${BROTLI_ENC_C})
 
 # Older CMake versions does not understand INCLUDE_DIRECTORIES property.
 include_directories(${BROTLI_INCLUDE_DIRS})
 
 foreach(lib brotlicommon brotlidec brotlienc)
+  target_compile_definitions(${lib} PUBLIC "BROTLI_SHARED_COMPILATION" )
+  string(TOUPPER "${lib}" LIB)
+  set_target_properties (${lib} PROPERTIES DEFINE_SYMBOL "${LIB}_SHARED_COMPILATION" )
+endforeach()
+
+foreach(lib brotlicommon brotlidec brotlienc brotlicommon-static brotlidec-static brotlienc-static)
   target_link_libraries(${lib} ${LIBM_LIBRARY})
   set_property(TARGET ${lib} APPEND PROPERTY INCLUDE_DIRECTORIES ${BROTLI_INCLUDE_DIRS})
   set_target_properties(${lib} PROPERTIES
-    SOVERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_REVISION}"
-    VERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_REVISION}"
+    VERSION "${BROTLI_ABI_COMPATIBILITY}.${BROTLI_ABI_AGE}.${BROTLI_ABI_REVISION}"
+    SOVERSION "${BROTLI_ABI_COMPATIBILITY}"
     POSITION_INDEPENDENT_CODE TRUE)
-  string(TOUPPER "${lib}" LIB)
-  set_target_properties (${lib} PROPERTIES DEFINE_SYMBOL "${LIB}_SHARED_COMPILATION" )
-
   set_property(TARGET ${lib} APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${BROTLI_INCLUDE_DIRS}")
 endforeach()
 
 target_link_libraries(brotlidec brotlicommon)
 target_link_libraries(brotlienc brotlicommon)
+
+target_link_libraries(brotlidec-static brotlicommon-static)
+target_link_libraries(brotlienc-static brotlicommon-static)
 
 # For projects stuck on older versions of CMake, this will set the
 # BROTLI_INCLUDE_DIRS and BROTLI_LIBRARIES variables so they still
@@ -181,28 +181,35 @@ if(BROTLI_PARENT_DIRECTORY)
   set(BROTLI_LIBRARIES "${BROTLI_LIBRARIES}" PARENT_SCOPE)
 endif()
 
-# Build the bro executable
-add_executable(bro tools/bro.c)
-target_link_libraries(bro ${BROTLI_LIBRARIES})
+# Build the brotli executable
+add_executable(brotli ${BROTLI_CLI_C})
+target_link_libraries(brotli ${BROTLI_LIBRARIES_STATIC})
 
 # Installation
 if(NOT BROTLI_BUNDLED_MODE)
-  install (TARGETS bro RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(
+    TARGETS brotli
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  )
 
-  if(WIN32)
-    install(
-      TARGETS ${BROTLI_LIBRARIES_CORE}
-      LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}"
-      ARCHIVE DESTINATION "${CMAKE_INSTALL_BINDIR}"
-    )
-  else()
-    install(TARGETS ${BROTLI_LIBRARIES_CORE}
-      LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-      ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    )
-    install(DIRECTORY ${BROTLI_INCLUDE_DIRS}/brotli DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
-  endif()
+  install(
+    TARGETS ${BROTLI_LIBRARIES_CORE}
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  )
 
+  install(
+    TARGETS ${BROTLI_LIBRARIES_CORE_STATIC}
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  )
+
+  install(
+    DIRECTORY ${BROTLI_INCLUDE_DIRS}/brotli
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  )
 endif()
 
 # Tests
@@ -229,9 +236,9 @@ if(NOT BROTLI_DISABLE_TESTS)
     tests/testdata/asyoulik.txt
     tests/testdata/lcet10.txt
     tests/testdata/plrabn12.txt
-    enc/encode.c
-    common/dictionary.h
-    dec/decode.c)
+    c/enc/encode.c
+    c/common/dictionary.h
+    c/dec/decode.c)
 
   foreach(INPUT ${ROUNDTRIP_INPUTS})
     get_filename_component(OUTPUT_NAME "${INPUT}" NAME)
@@ -243,10 +250,10 @@ if(NOT BROTLI_DISABLE_TESTS)
       add_test(NAME "${BROTLI_TEST_PREFIX}roundtrip/${INPUT}/${quality}"
         COMMAND "${CMAKE_COMMAND}"
           -DBROTLI_WRAPPER=${BROTLI_WINE}
-          -DBROTLI_CLI=$<TARGET_FILE:bro>
+          -DBROTLI_CLI=$<TARGET_FILE:brotli>
           -DQUALITY=${quality}
           -DINPUT=${INPUT_FILE}
-  	  -DOUTPUT=${OUTPUT_FILE}.${quality}
+          -DOUTPUT=${OUTPUT_FILE}.${quality}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-roundtrip-test.cmake)
     endforeach()
   endforeach()
@@ -260,15 +267,13 @@ if(NOT BROTLI_DISABLE_TESTS)
     add_test(NAME "${BROTLI_TEST_PREFIX}compatibility/${INPUT}"
       COMMAND "${CMAKE_COMMAND}"
         -DBROTLI_WRAPPER=${BROTLI_WINE}
-        -DBROTLI_CLI=$<TARGET_FILE:bro>
+        -DBROTLI_CLI=$<TARGET_FILE:brotli>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/${INPUT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-compatibility-test.cmake)
   endforeach()
 endif()
 
-# Generate a pkg-config file
-
-include(CMakeParseArguments)
+# Generate a pkg-config files
 
 function(generate_pkg_config_path outvar path)
   string(LENGTH "${path}" path_length)
@@ -313,103 +318,29 @@ function(generate_pkg_config_path outvar path)
   set("${outvar}" "${${outvar}}" PARENT_SCOPE)
 endfunction(generate_pkg_config_path)
 
-function(generate_pkg_config output_file)
-  set (options)
-  set (oneValueArgs NAME DESCRIPTION URL VERSION PREFIX LIBDIR INCLUDEDIR)
-  set (multiValueArgs DEPENDS_PRIVATE CFLAGS LIBRARIES)
-  cmake_parse_arguments(GEN_PKG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-  unset (options)
-  unset (oneValueArgs)
-  unset (multiValueArgs)
+function(transform_pc_file INPUT_FILE OUTPUT_FILE VERSION)
+  file(READ ${INPUT_FILE} TEXT)
 
-  if(NOT GEN_PKG_PREFIX)
-    set(GEN_PKG_PREFIX "${CMAKE_INSTALL_PREFIX}")
-  endif()
+  set(PREFIX "${CMAKE_INSTALL_PREFIX}")
+  string(REGEX REPLACE "@prefix@" "${PREFIX}" TEXT ${TEXT})
+  string(REGEX REPLACE "@exec_prefix@" "${PREFIX}" TEXT ${TEXT})
 
-  if(NOT GEN_PKG_LIBDIR)
-    set(GEN_PKG_LIBDIR "${CMAKE_INSTALL_FULL_LIBDIR}")
-  endif()
-  generate_pkg_config_path(GEN_PKG_LIBDIR "${GEN_PKG_LIBDIR}"
-    prefix "${GEN_PKG_PREFIX}")
+  generate_pkg_config_path(LIBDIR "${CMAKE_INSTALL_FULL_LIBDIR}" prefix "${PREFIX}")
+  string(REGEX REPLACE "@libdir@" "${LIBDIR}" TEXT ${TEXT})
 
-  if(NOT GEN_PKG_INCLUDEDIR)
-    set(GEN_PKG_INCLUDEDIR "${CMAKE_INSTALL_FULL_INCLUDEDIR}")
-  endif()
-  generate_pkg_config_path(GEN_PKG_INCLUDEDIR "${GEN_PKG_INCLUDEDIR}"
-    prefix "${GEN_PKG_PREFIX}")
+  generate_pkg_config_path(INCLUDEDIR "${CMAKE_INSTALL_FULL_INCLUDEDIR}" prefix "${PREFIX}")
+  string(REGEX REPLACE "@includedir@" "${INCLUDEDIR}" TEXT ${TEXT})
 
-  file(WRITE  "${output_file}" "prefix=${GEN_PKG_PREFIX}\n")
-  file(APPEND "${output_file}" "libdir=${GEN_PKG_LIBDIR}\n")
-  file(APPEND "${output_file}" "includedir=${GEN_PKG_INCLUDEDIR}\n")
-  file(APPEND "${output_file}" "\n")
+  string(REGEX REPLACE "@PACKAGE_VERSION@" "${VERSION}" TEXT ${TEXT})
 
-  if(GEN_PKG_NAME)
-    file(APPEND "${output_file}" "Name: ${GEN_PKG_NAME}\n")
-  else()
-    file(APPEND "${output_file}" "Name: ${CMAKE_PROJECT_NAME}\n")
-  endif()
+  file(WRITE ${OUTPUT_FILE} ${TEXT})
+endfunction()
 
-  if(GEN_PKG_DESCRIPTION)
-    file(APPEND "${output_file}" "Description: ${GEN_PKG_DESCRIPTION}\n")
-  endif()
+transform_pc_file("scripts/libbrotlicommon.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/libbrotlicommon.pc" "${BROTLI_VERSION}")
 
-  if(GEN_PKG_URL)
-    file(APPEND "${output_file}" "URL: ${GEN_PKG_URL}\n")
-  endif()
+transform_pc_file("scripts/libbrotlidec.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/libbrotlidec.pc" "${BROTLI_VERSION}")
 
-  if(GEN_PKG_VERSION)
-    file(APPEND "${output_file}" "Version: ${GEN_PKG_VERSION}\n")
-  endif()
-
-  if(GEN_PKG_DEPENDS_PRIVATE)
-    file(APPEND "${output_file}" "Requires.private:")
-    foreach(lib ${GEN_PKG_DEPENDS_PRIVATE})
-      file(APPEND "${output_file}" " ${lib}")
-    endforeach()
-    file(APPEND "${output_file}" "\n")
-  endif()
-
-  if(GEN_PKG_LIBRARIES)
-    set(libs)
-
-    file(APPEND "${output_file}" "Libs: -L\${libdir}")
-    foreach(lib ${GEN_PKG_LIBRARIES})
-      file(APPEND "${output_file}" " -l${lib}")
-    endforeach()
-    file(APPEND "${output_file}" "\n")
-  endif()
-
-  file(APPEND "${output_file}" "Cflags: -I\${includedir}")
-  if(GEN_PKG_CFLAGS)
-    foreach(cflag ${GEN_PKG_CFLAGS})
-      file(APPEND "${output_file}" " ${cflag}")
-    endforeach()
-  endif()
-  file(APPEND "${output_file}" "\n")
-endfunction(generate_pkg_config)
-
-generate_pkg_config ("${CMAKE_CURRENT_BINARY_DIR}/libbrotlicommon.pc"
-  NAME libbrotlicommon
-  DESCRIPTION "Shared data used by libbrotlienc and libbrotlidec libraries"
-  URL "https://github.com/google/brotli"
-  VERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_REVISION}"
-  LIBRARIES brotlicommon)
-
-generate_pkg_config ("${CMAKE_CURRENT_BINARY_DIR}/libbrotlidec.pc"
-  NAME libbrotlidec
-  DESCRIPTION "Brotli decoder library"
-  VERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_REVISION}"
-  URL "https://github.com/google/brotli"
-  DEPENDS_PRIVATE libbrotlicommon
-  LIBRARIES brotlidec)
-
-generate_pkg_config ("${CMAKE_CURRENT_BINARY_DIR}/libbrotlienc.pc"
-  NAME libbrotlienc
-  DESCRIPTION "Brotli encoder library"
-  VERSION "${BROTLI_VERSION_MAJOR}.${BROTLI_VERSION_MINOR}.${BROTLI_VERSION_REVISION}"
-  URL "https://github.com/google/brotli"
-  DEPENDS_PRIVATE libbrotlicommon
-  LIBRARIES brotlienc)
+transform_pc_file("scripts/libbrotlienc.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/libbrotlienc.pc" "${BROTLI_VERSION}")
 
 if(NOT BROTLI_BUNDLED_MODE)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libbrotlicommon.pc"

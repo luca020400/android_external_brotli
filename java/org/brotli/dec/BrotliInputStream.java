@@ -16,7 +16,7 @@ import java.io.InputStream;
  */
 public class BrotliInputStream extends InputStream {
 
-  public static final int DEFAULT_INTERNAL_BUFFER_SIZE = 16384;
+  public static final int DEFAULT_INTERNAL_BUFFER_SIZE = 256;
 
   /**
    * Internal buffer used for efficient byte-by-byte reading.
@@ -44,13 +44,14 @@ public class BrotliInputStream extends InputStream {
    * <p> For byte-by-byte reading ({@link #read()}) internal buffer with
    * {@link #DEFAULT_INTERNAL_BUFFER_SIZE} size is allocated and used.
    *
-   * <p> Will block the thread until first kilobyte of data of source is available.
+   * <p> Will block the thread until first {@link BitReader#CAPACITY} bytes of data of source
+   * are available.
    *
    * @param source underlying data source
    * @throws IOException in case of corrupted data or source stream problems
    */
   public BrotliInputStream(InputStream source) throws IOException {
-    this(source, DEFAULT_INTERNAL_BUFFER_SIZE, null);
+    this(source, DEFAULT_INTERNAL_BUFFER_SIZE);
   }
 
   /**
@@ -59,7 +60,8 @@ public class BrotliInputStream extends InputStream {
    * <p> For byte-by-byte reading ({@link #read()}) internal buffer of specified size is
    * allocated and used.
    *
-   * <p> Will block the thread until first kilobyte of data of source is available.
+   * <p> Will block the thread until first {@link BitReader#CAPACITY} bytes of data of source
+   * are available.
    *
    * @param source compressed data source
    * @param byteReadBufferSize size of internal buffer used in case of
@@ -67,25 +69,6 @@ public class BrotliInputStream extends InputStream {
    * @throws IOException in case of corrupted data or source stream problems
    */
   public BrotliInputStream(InputStream source, int byteReadBufferSize) throws IOException {
-    this(source, byteReadBufferSize, null);
-  }
-
-  /**
-   * Creates a {@link InputStream} wrapper that decompresses brotli data.
-   *
-   * <p> For byte-by-byte reading ({@link #read()}) internal buffer of specified size is
-   * allocated and used.
-   *
-   * <p> Will block the thread until first kilobyte of data of source is available.
-   *
-   * @param source compressed data source
-   * @param byteReadBufferSize size of internal buffer used in case of
-   *        byte-by-byte reading
-   * @param customDictionary custom dictionary data; {@code null} if not used
-   * @throws IOException in case of corrupted data or source stream problems
-   */
-  public BrotliInputStream(InputStream source, int byteReadBufferSize,
-      byte[] customDictionary) throws IOException {
     if (byteReadBufferSize <= 0) {
       throw new IllegalArgumentException("Bad buffer size:" + byteReadBufferSize);
     } else if (source == null) {
@@ -95,13 +78,14 @@ public class BrotliInputStream extends InputStream {
     this.remainingBufferBytes = 0;
     this.bufferOffset = 0;
     try {
-      State.setInput(state, source);
+      Decode.initState(state, source);
     } catch (BrotliRuntimeException ex) {
       throw new IOException("Brotli decoder initialization failed", ex);
     }
-    if (customDictionary != null) {
-      Decode.setCustomDictionary(state, customDictionary);
-    }
+  }
+
+  public void setEager(boolean eager) {
+    state.isEager = eager ? 1 : 0;
   }
 
   /**
@@ -109,7 +93,7 @@ public class BrotliInputStream extends InputStream {
    */
   @Override
   public void close() throws IOException {
-    State.close(state);
+    Decode.close(state);
   }
 
   /**
@@ -166,5 +150,7 @@ public class BrotliInputStream extends InputStream {
     } catch (BrotliRuntimeException ex) {
       throw new IOException("Brotli stream decoding failed", ex);
     }
+
+    // <{[INJECTED CODE]}>
   }
 }
